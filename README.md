@@ -112,6 +112,21 @@ The core of the adapter's flexibility lies in its ability to map Claude's expect
 | `sonnet`    | Balanced tasks    | `deepseek-3.2`, `minimax-m2.1` |
 | `haiku`     | Low-latency ops   | `gpt-5-mini`, `gpt-oss-120b`   |
 
+### Azure OpenAI v1
+
+Claude Adapter now supports **Azure OpenAI v1** endpoints on the current chat completions pipeline.
+
+- Use an Azure v1 base URL in this shape:
+  `https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1/`
+- Set the mapped model names to your **deployment names**.
+- Claude Adapter auto-detects Azure OpenAI v1 from the base URL and uses Azure-compatible request handling.
+- When Azure rejects `max_tokens` for a deployment and asks for `max_completion_tokens`, Claude Adapter retries automatically with the Azure-compatible field.
+
+Current scope:
+
+- Supported: Azure OpenAI **v1**
+- Not in scope: older Azure `?api-version=...` data plane endpoints
+
 ---
 
 ## API Reference
@@ -178,6 +193,11 @@ For detailed type definitions and function signatures, please consult the [API D
 | Sampling (Temp/Top P) |       ✅        | Parameter pass-through     |
 | Stop Sequences        |       ✅        | Mapped to API equivalent   |
 | Multimodal (Vision)   |       🔜        | Implementation roadmap     |
+
+Provider notes:
+
+- Standard OpenAI-compatible providers continue using the existing SDK path.
+- Azure OpenAI v1 uses an Azure-specific transport path to support Azure authentication and token-limit parameter compatibility.
 
 ---
 

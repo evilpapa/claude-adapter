@@ -11,6 +11,14 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { createAzureChatCompletion, createAzureChatCompletionStream } from '../utils/azureOpenAI';
+import { isAzureOpenAIV1BaseUrl } from '../utils/provider';
+import {
+    buildOpenAIAuthHeaders,
+    summarizeHeaders,
+    summarizePayload,
+    summarizeResponseBody
+} from '../utils/debugFormat';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
@@ -26,7 +34,8 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-    const openai = new OpenAI({
+    const isAzureOpenAIV1 = isAzureOpenAIV1BaseUrl(config.baseUrl);
+    const openai = isAzureOpenAIV1 ? null : new OpenAI({
         baseURL: config.baseUrl,
         apiKey: config.apiKey,
     });
@@ -54,6 +63,12 @@ export function createMessagesHandler(config: AdapterConfig) {
             const isStreaming = anthropicRequest.stream ?? false;
 
             log.info(`→ ${targetModel} [sent]`);
+            log.debug('Incoming Anthropic request', {
+                method: request.method,
+                url: request.url,
+                headers: summarizeHeaders(request.headers as Record<string, unknown>),
+                body: summarizePayload(anthropicRequest)
+            });
 
             // Determine tool calling style from config
             const toolStyle = config.toolFormat || 'native';
@@ -68,12 +83,12 @@ export function createMessagesHandler(config: AdapterConfig) {
 
             if (isStreaming) {
                 if (toolStyle === 'xml') {
-                    await handleXmlStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                    await handleXmlStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config, log);
                 } else {
-                    await handleStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                    await handleStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config, log);
                 }
             } else {
-                await handleNonStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                await handleNonStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config, log);
             }
 
             log.info(`← ${targetModel} [received]`);
@@ -93,29 +108,48 @@ export function createMessagesHandler(config: AdapterConfig) {
  * Handle non-streaming API request
  */
 async function handleNonStreamingRequest(
-    openai: OpenAI,
+    openai: OpenAI | null,
     openaiRequest: any,
     reply: FastifyReply,
     originalModel: string,
-    provider: string,
+    config: AdapterConfig,
     log: RequestLogger
 ): Promise<void> {
     log.debug('Making non-streaming request');
+    const isAzureRequest = isAzureOpenAIV1BaseUrl(config.baseUrl);
 
-    const response = await openai.chat.completions.create({
-        ...openaiRequest,
-        stream: false,
-    });
+    if (!isAzureRequest) {
+        log.debug('Upstream request', {
+            provider: 'openai-compatible',
+            url: `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            headers: summarizeHeaders(buildOpenAIAuthHeaders(config.apiKey)),
+            params: summarizePayload({
+                ...openaiRequest,
+                stream: false,
+            })
+        });
+    }
+
+    const response = isAzureRequest
+        ? await createAzureChatCompletion(config.baseUrl, config.apiKey, {
+            ...openaiRequest,
+            stream: false,
+        }, log)
+        : await openai!.chat.completions.create({
+            ...openaiRequest,
+            stream: false,
+        });
 
     log.debug('Response received', {
         finishReason: response.choices[0]?.finish_reason,
-        usage: response.usage
+        usage: response.usage,
+        body: summarizeResponseBody(response)
     });
 
     // Record token usage
     if (response.usage) {
         recordUsage({
-            provider,
+            provider: config.baseUrl,
             modelName: originalModel,
             model: response.model,
             inputTokens: response.usage.prompt_tokens,
@@ -133,21 +167,39 @@ async function handleNonStreamingRequest(
  * Handle streaming API request
  */
 async function handleStreamingRequest(
-    openai: OpenAI,
+    openai: OpenAI | null,
     openaiRequest: any,
     reply: FastifyReply,
     originalModel: string,
-    provider: string,
+    config: AdapterConfig,
     log: RequestLogger
 ): Promise<void> {
     log.debug('Making streaming request');
+    const isAzureRequest = isAzureOpenAIV1BaseUrl(config.baseUrl);
 
-    const stream = await openai.chat.completions.create({
-        ...openaiRequest,
-        stream: true,
-    } as OpenAI.ChatCompletionCreateParamsStreaming);
+    if (!isAzureRequest) {
+        log.debug('Upstream request', {
+            provider: 'openai-compatible',
+            url: `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            headers: summarizeHeaders(buildOpenAIAuthHeaders(config.apiKey)),
+            params: summarizePayload({
+                ...openaiRequest,
+                stream: true,
+            })
+        });
+    }
 
-    await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider);
+    const stream = isAzureRequest
+        ? await createAzureChatCompletionStream(config.baseUrl, config.apiKey, {
+            ...openaiRequest,
+            stream: true,
+        }, log)
+        : await openai!.chat.completions.create({
+            ...openaiRequest,
+            stream: true,
+        } as OpenAI.ChatCompletionCreateParamsStreaming);
+
+    await streamOpenAIToAnthropic(stream as any, reply, originalModel, config.baseUrl, log);
     log.debug('Streaming completed');
 }
 
@@ -155,21 +207,39 @@ async function handleStreamingRequest(
  * Handle XML streaming API request (for models without native tool calling)
  */
 async function handleXmlStreamingRequest(
-    openai: OpenAI,
+    openai: OpenAI | null,
     openaiRequest: any,
     reply: FastifyReply,
     originalModel: string,
-    provider: string,
+    config: AdapterConfig,
     log: RequestLogger
 ): Promise<void> {
     log.debug('Making XML streaming request (experimental)');
+    const isAzureRequest = isAzureOpenAIV1BaseUrl(config.baseUrl);
 
-    const stream = await openai.chat.completions.create({
-        ...openaiRequest,
-        stream: true,
-    } as OpenAI.ChatCompletionCreateParamsStreaming);
+    if (!isAzureRequest) {
+        log.debug('Upstream request', {
+            provider: 'openai-compatible',
+            url: `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+            headers: summarizeHeaders(buildOpenAIAuthHeaders(config.apiKey)),
+            params: summarizePayload({
+                ...openaiRequest,
+                stream: true,
+            })
+        });
+    }
 
-    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider);
+    const stream = isAzureRequest
+        ? await createAzureChatCompletionStream(config.baseUrl, config.apiKey, {
+            ...openaiRequest,
+            stream: true,
+        }, log)
+        : await openai!.chat.completions.create({
+            ...openaiRequest,
+            stream: true,
+        } as OpenAI.ChatCompletionCreateParamsStreaming);
+
+    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, config.baseUrl, log);
     log.debug('XML streaming completed');
 }
 

@@ -9,6 +9,8 @@ import { OpenAIStreamChunk, OpenAIStreamToolCall } from '../types/openai';
 import { generateToolUseId } from './tools';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { RequestLogger } from '../utils/logger';
+import { summarizeResponseBody } from '../utils/debugFormat';
 
 // Global counter and set for unique tool IDs within this process
 let toolIdCounter = 0;
@@ -64,7 +66,8 @@ export async function streamOpenAIToAnthropic(
     openaiStream: Stream<OpenAIStreamChunk>,
     reply: FastifyReply,
     originalModel: string,
-    provider: string = ''
+    provider: string = '',
+    log?: RequestLogger
 ): Promise<void> {
     const state: StreamingState = {
         messageId: `msg_${Date.now().toString(36)}`,
@@ -92,6 +95,10 @@ export async function streamOpenAIToAnthropic(
 
     try {
         for await (const chunk of openaiStream) {
+            log?.debug('Upstream stream chunk', {
+                provider,
+                body: summarizeResponseBody(chunk)
+            });
             processChunk(chunk, state, raw);
         }
 

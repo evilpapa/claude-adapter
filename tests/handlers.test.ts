@@ -59,6 +59,11 @@ jest.mock('../src/converters/xmlStreaming', () => ({
 const handlersModule = require('../src/server/handlers');
 
 describe('Request Handlers', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        delete (global as any).fetch;
+    });
+
     describe('createMessagesHandler', () => {
         it('should create a handler function', () => {
             const config = {
@@ -269,6 +274,91 @@ describe('Error Response Handling', () => {
             await handler({ body: { ...mockRequestBase, stream: false } }, mockReply);
             // Verify no error was thrown and function completed
             expect(mockReply.send).toHaveBeenCalled();
+        });
+
+        it('should retry Azure v1 requests with max_completion_tokens when max_tokens is rejected', async () => {
+            const azureConfig = {
+                baseUrl: 'https://example.openai.azure.com/openai/v1/',
+                apiKey: 'azure-key',
+                models: { opus: 'gpt-4o', sonnet: 'gpt-4o', haiku: 'gpt-4o' }
+            };
+            const handler = handlersModule.createMessagesHandler(azureConfig);
+            const { convertRequestToOpenAI } = require('../src/converters/request');
+
+            const fetchMock = jest.fn()
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 400,
+                    statusText: 'Bad Request',
+                    json: async () => ({
+                        error: {
+                            message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+                        }
+                    })
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        id: 'chatcmpl-azure',
+                        choices: [{ finish_reason: 'stop', message: { content: 'Hello from Azure' } }],
+                        usage: { prompt_tokens: 12, completion_tokens: 6 },
+                        model: 'gpt-5'
+                    })
+                });
+
+            (global as any).fetch = fetchMock;
+            convertRequestToOpenAI.mockReturnValueOnce({
+                model: 'gpt-5',
+                messages: [],
+                max_tokens: 100,
+                stream: false
+            });
+
+            await handler({ body: { ...mockRequestBase, stream: false } }, mockReply);
+
+            expect(fetchMock).toHaveBeenCalledTimes(2);
+
+            const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+            const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+
+            expect(firstBody.max_tokens).toBe(100);
+            expect(firstBody.max_completion_tokens).toBeUndefined();
+            expect(secondBody.max_tokens).toBeUndefined();
+            expect(secondBody.max_completion_tokens).toBe(100);
+            expect(mockCreateChatCompletion).not.toHaveBeenCalled();
+            expect(mockReply.send).toHaveBeenCalled();
+        });
+
+        it('should stream Azure v1 requests through fetch instead of the OpenAI SDK', async () => {
+            const azureConfig = {
+                baseUrl: 'https://example.openai.azure.com/openai/v1/',
+                apiKey: 'azure-key',
+                models: { opus: 'gpt-4o', sonnet: 'gpt-4o', haiku: 'gpt-4o' }
+            };
+            const handler = handlersModule.createMessagesHandler(azureConfig);
+            const streamOpenAIToAnthropic = require('../src/converters/streaming').streamOpenAIToAnthropic;
+
+            const encoder = new TextEncoder();
+            const body = new ReadableStream({
+                start(controller) {
+                    controller.enqueue(encoder.encode('data: {"id":"chunk-1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n'));
+                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                    controller.close();
+                }
+            });
+
+            (global as any).fetch = jest.fn().mockResolvedValue({
+                ok: true,
+                status: 200,
+                body
+            });
+
+            await handler({ body: { ...mockRequestBase, stream: true } }, mockReply);
+
+            expect((global as any).fetch).toHaveBeenCalledTimes(1);
+            expect(mockCreateChatCompletion).not.toHaveBeenCalled();
+            expect(streamOpenAIToAnthropic).toHaveBeenCalled();
         });
     });
 });

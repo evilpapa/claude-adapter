@@ -7,6 +7,8 @@ import { OpenAIStreamChunk } from '../types/openai';
 import { generateToolUseId } from './tools';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { RequestLogger } from '../utils/logger';
+import { summarizeResponseBody } from '../utils/debugFormat';
 
 interface BufferedState {
     messageId: string;
@@ -36,7 +38,8 @@ export async function streamXmlOpenAIToAnthropic(
     openaiStream: Stream<OpenAIStreamChunk>,
     reply: FastifyReply,
     originalModel: string,
-    provider: string = ''
+    provider: string = '',
+    log?: RequestLogger
 ): Promise<void> {
     const state: BufferedState = {
         messageId: `msg_${Date.now().toString(36)}`,
@@ -62,6 +65,10 @@ export async function streamXmlOpenAIToAnthropic(
 
     try {
         for await (const chunk of openaiStream) {
+            log?.debug('Upstream stream chunk', {
+                provider,
+                body: summarizeResponseBody(chunk)
+            });
             processChunk(chunk, state, raw);
         }
 
